@@ -1,0 +1,165 @@
+#!/usr/bin/python3
+
+import argparse
+from os import listdir
+import os.path
+import re
+import subprocess
+import sys
+import yaml
+
+
+def main():
+    # Arguments
+    parser = argparse.ArgumentParser(prog='status')
+    parser.add_argument('--width', type=int, dest='width', help='Limits width of bar text to this number of characters')
+    parser.add_argument('--scripts', dest='scripts_dir', help='Directory of status scripts to run')
+    parser.add_argument('--compact', action='store_true', default=False, dest='compact', help='compact messages with the same label')
+    parser.add_argument('--colour', action='store_true', default=False, dest='colour', help='compact messages with the same label')
+
+    args = parser.parse_args()
+    bar_width = args.width
+    scripts_dir = args.scripts_dir
+    compact = args.compact
+    colour = args.colour
+
+    # Scripts directory
+    if scripts_dir is None:
+        scripts_dir = find_config("status.d", True)
+
+    # Config
+    colours = {}
+    levels = []
+    config_file = find_config("status.yml", False)
+    if os.path.exists(config_file):
+        with open(config_file, 'r') as fh:
+            config = yaml.load(fh, Loader=yaml.CLoader)
+            for level in config['levels']:
+                level_key = list(level.keys())[0]
+                levels.append(level_key)
+                colours[level_key] = level[level_key]['foreground']
+
+    message_regex = re.compile(r'([^|]*)\|([^|]*)\|(.*)')
+    messages = []
+
+    # Search for scripts and execute them
+    files = [f for f in sorted(listdir(scripts_dir)) if os.path.isfile(os.path.join(scripts_dir, f))]
+    for file_name in files:
+        try:
+            file_path = os.path.join(scripts_dir, file_name)
+            sudo = file_name.startswith('sudo_')
+            if os.access(file_path, os.X_OK):
+                command = file_path
+                if sudo:
+                    username = cmd("whoami")
+                    command = "sudo {}".format(command)
+                    print(command)
+                results = cmd(command)
+                for result in results.split("\n"):
+                    if result == '':
+                        continue
+                    match = message_regex.match(result)
+                    if match:
+                        messages.append({
+                            'level': match.group(1),
+                            'label': match.group(2),
+                            'text': match.group(3)})
+                    else:
+                        messages.append({
+                            'level': 'error',
+                            'label': '',
+                            'text': "Status script {} returned malformed line: '{}'".format(file_name, result)
+                            })
+        except Exception:
+            messages.append({
+                'level': 'error',
+                'label': '',
+                'text': "Error running status script {}".format(file_name)})
+
+    # Output messages found
+    if len(messages) > 0:
+
+        # Group all messages together by label
+        labels = {}
+        for label in set([m['label'] for m in messages]):
+            label_messages = [m for m in messages if m['label'] == label]
+            label_level = levels[max([levels.index(m['level']) for m in label_messages])]
+            labels[label] = {
+                'messages': label_messages,
+                'count': len(label_messages),
+                'level': label_level,
+            }
+
+        # Bar messages - compact multiple messages for a given label into one
+        bar_messages = []
+        if '' in labels:
+            bar_messages.extend(labels['']['messages'])
+        for label in labels:
+            if label != '':
+                if compact:
+                    if labels[label]['count'] > 1:
+                        bar_messages.append({
+                            'level': labels[label]['level'],
+                            'label': label,
+                            'text': "({})".format(labels[label]['count'])
+                        })
+                    else:
+                        bar_messages.append(labels[label]['messages'][0])
+                else:
+                    for message in labels[label]['messages']:
+                        bar_messages.append(message)
+
+        # Sort messages by level and label name
+        sorted_bar_messages = []
+        for m in sorted(bar_messages, key=lambda x: str(len(levels) - levels.index(x['level'])) + x['label']):
+            message = ''
+            if m['label'] != '':
+                message = "[{}] ".format(m['label'])
+            message += m['text']
+            if bar_width is not None and bar_width < len(message):
+                message = message[0:bar_width]
+
+            sorted_bar_messages.append(colour_text(colour, message, colours[m['level']]))
+        bar_text = "\n".join(sorted_bar_messages)
+
+        # Output results
+        print(bar_text)
+
+    else:
+        # No messages found
+        print(colour_text(colour, "No messages", colours['inactive']), flush=True)
+
+
+# Run a shell command
+def cmd(command):
+    result = subprocess.run(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout = result.stdout.decode('utf-8').rstrip("\n")
+    stderr = result.stderr.decode('utf-8').rstrip("\n")
+    if result.returncode != 0:
+        raise Exception("Command returned code {}".format(result.returncode))
+    return stdout
+
+# Search for a file/dir in all config dirs
+def find_config(file_name, is_directory):
+    locations = []
+    if 'XDG_CONFIG_DIRS' in os.environ:
+        locations = os.environ['XDG_CONFIG_DIRS'].split(':')
+    locations.append(os.path.expanduser("~/.config"))
+    for location in locations:
+        file_path = os.path.join(location, file_name)
+        if is_directory:
+            if os.path.isdir(file_path):
+                return file_path
+        else:
+            if os.path.isfile(file_path):
+                return file_path
+    return None
+
+def colour_text(do_colour, text, colour):
+    if do_colour:
+        return "<font color=\"{}\">{}</font>".format(colour, text)
+    return text
+
+
+if __name__ == '__main__':
+    main()
