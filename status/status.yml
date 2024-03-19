@@ -1,0 +1,9 @@
+levels:
+  - inactive:
+      foreground: '#3f4246'
+  - info:
+      foreground: '#ffffff'
+  - warn:
+      foreground: '#ffff00'
+  - error:
+      foreground: '#ff0000'
